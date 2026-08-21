@@ -4,9 +4,13 @@ import org.junit.jupiter.api.Test;
 import org.springframework.core.MethodParameter;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.BindingResult;
 import org.springframework.validation.FieldError;
+import org.springframework.validation.ObjectError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.lang.reflect.Method;
 
@@ -50,6 +54,58 @@ class GlobalExceptionHandlerTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(response.getBody().field()).isNull();
         assertThat(response.getBody().message()).isEqualTo("Validation failed");
+    }
+
+    @Test
+    void handleValidationReturnsGlobalErrorMessageForClassLevelConstraintViolation() throws NoSuchMethodException {
+        BindingResult bindingResult = mock(BindingResult.class);
+        when(bindingResult.getFieldError()).thenReturn(null);
+        ObjectError objectError = new ObjectError("transferRequest",
+                "fromAccountReference and toAccountReference must differ");
+        when(bindingResult.getGlobalError()).thenReturn(objectError);
+        MethodArgumentNotValidException ex =
+                new MethodArgumentNotValidException(dummyMethodParameter(), bindingResult);
+
+        ResponseEntity<ErrorResponse> response = handler.handleValidation(ex);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().field()).isNull();
+        assertThat(response.getBody().message())
+                .isEqualTo("fromAccountReference and toAccountReference must differ");
+    }
+
+    @Test
+    void handleMissingHeaderReturnsBadRequestNamingTheHeader() throws NoSuchMethodException {
+        MissingRequestHeaderException ex =
+                new MissingRequestHeaderException("Idempotency-Key", dummyMethodParameter());
+
+        ResponseEntity<ErrorResponse> response = handler.handleMissingHeader(ex);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().message()).isEqualTo("Missing required header: Idempotency-Key");
+    }
+
+    @Test
+    void handleMalformedRequestBodyReturnsBadRequestWithoutLeakingParserDetails() {
+        HttpMessageNotReadableException ex =
+                new HttpMessageNotReadableException("JSON parse error: Unexpected character ('}' (code 125))");
+
+        ResponseEntity<ErrorResponse> response = handler.handleMalformedRequestBody(ex);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().message()).isEqualTo("Malformed request body");
+        assertThat(response.getBody().message()).doesNotContain("JSON parse error");
+    }
+
+    @Test
+    void handleTypeMismatchReturnsBadRequestNamingParameterAndExpectedType() throws NoSuchMethodException {
+        MethodArgumentTypeMismatchException ex = new MethodArgumentTypeMismatchException(
+                "not-a-number", Long.class, "accountId", dummyMethodParameter(), new IllegalArgumentException());
+
+        ResponseEntity<ErrorResponse> response = handler.handleTypeMismatch(ex);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().message()).isEqualTo("Invalid value for parameter 'accountId': expected Long");
     }
 
     @Test
