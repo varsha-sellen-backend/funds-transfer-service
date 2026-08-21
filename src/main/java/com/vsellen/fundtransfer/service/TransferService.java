@@ -6,6 +6,7 @@ import com.vsellen.fundtransfer.domain.TransferStatus;
 import com.vsellen.fundtransfer.dto.TransferRequest;
 import com.vsellen.fundtransfer.dto.TransferResponse;
 import com.vsellen.fundtransfer.event.TransferInitiatedEvent;
+import com.vsellen.fundtransfer.exception.AccountNotFoundException;
 import com.vsellen.fundtransfer.exception.InsufficientFundsException;
 import com.vsellen.fundtransfer.exception.TransferNotFoundException;
 import com.vsellen.fundtransfer.kafka.TransferEventProducer;
@@ -45,10 +46,16 @@ public class TransferService {
     }
 
     private Transfer createAndPublish(TransferRequest request, String idempotencyKey) {
+        // Resolve both references before touching anything else, so a bad reference fails
+        // fast with a clear error instead of surfacing later as an orphaned INITIATED
+        // transfer that Kafka processing can never complete.
+        Account fromAccount = resolveAccount(request.getFromAccountReference());
+        Account toAccount = resolveAccount(request.getToAccountReference());
+
         Transfer transfer = new Transfer();
         transfer.setReferenceId(idempotencyKey);
-        transfer.setFromAccountId(request.getFromAccountId());
-        transfer.setToAccountId(request.getToAccountId());
+        transfer.setFromAccountId(fromAccount.getId());
+        transfer.setToAccountId(toAccount.getId());
         transfer.setAmount(request.getAmount());
         transfer.setStatus(TransferStatus.INITIATED);
         transfer.setCreatedAt(LocalDateTime.now());
@@ -62,6 +69,11 @@ public class TransferService {
 
         eventProducer.publishTransferInitiated(new TransferInitiatedEvent(transfer.getId()));
         return transfer;
+    }
+
+    private Account resolveAccount(String externalReference) {
+        return accountRepository.findByExternalReference(externalReference)
+                .orElseThrow(() -> new AccountNotFoundException(externalReference));
     }
 
     public Transfer findById(String id) {

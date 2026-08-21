@@ -5,6 +5,7 @@ import com.vsellen.fundtransfer.domain.Transfer;
 import com.vsellen.fundtransfer.domain.TransferStatus;
 import com.vsellen.fundtransfer.dto.TransferRequest;
 import com.vsellen.fundtransfer.event.TransferInitiatedEvent;
+import com.vsellen.fundtransfer.exception.AccountNotFoundException;
 import com.vsellen.fundtransfer.exception.TransferNotFoundException;
 import com.vsellen.fundtransfer.kafka.TransferEventProducer;
 import com.vsellen.fundtransfer.repository.AccountRepository;
@@ -62,19 +63,41 @@ class TransferServiceTest {
     @Test
     void initiateWithNewIdempotencyKeyCreatesTransferAndPublishesEvent() {
         when(transferRepository.findByReferenceId("key-2")).thenReturn(Optional.empty());
+        stubAccount("ref-from", 1L);
+        stubAccount("ref-to", 2L);
+
         TransferRequest request = new TransferRequest();
-        request.setFromAccountId(1L);
-        request.setToAccountId(2L);
+        request.setFromAccountReference("ref-from");
+        request.setToAccountReference("ref-to");
         request.setAmount(new BigDecimal("50.00"));
 
         Transfer result = transferService.initiate(request, "key-2");
 
         assertThat(result.getStatus()).isEqualTo(TransferStatus.INITIATED);
         assertThat(result.getReferenceId()).isEqualTo("key-2");
+        assertThat(result.getFromAccountId()).isEqualTo(1L);
+        assertThat(result.getToAccountId()).isEqualTo(2L);
 
         ArgumentCaptor<TransferInitiatedEvent> eventCaptor = ArgumentCaptor.forClass(TransferInitiatedEvent.class);
         verify(eventProducer).publishTransferInitiated(eventCaptor.capture());
         assertThat(eventCaptor.getValue().getTransferId()).isEqualTo(result.getId());
+    }
+
+    @Test
+    void initiateThrowsAccountNotFoundWhenFromReferenceDoesNotResolve() {
+        when(transferRepository.findByReferenceId("key-9")).thenReturn(Optional.empty());
+        when(accountRepository.findByExternalReference("missing-ref")).thenReturn(Optional.empty());
+
+        TransferRequest request = new TransferRequest();
+        request.setFromAccountReference("missing-ref");
+        request.setToAccountReference("ref-to");
+        request.setAmount(new BigDecimal("50.00"));
+
+        assertThatThrownBy(() -> transferService.initiate(request, "key-9"))
+                .isInstanceOf(AccountNotFoundException.class);
+
+        verify(transferRepository, never()).saveAndFlush(any());
+        verify(eventProducer, never()).publishTransferInitiated(any());
     }
 
     @Test
@@ -84,12 +107,25 @@ class TransferServiceTest {
         when(transferRepository.findByReferenceId("key-3"))
                 .thenReturn(Optional.empty())
                 .thenReturn(Optional.of(winner));
+        stubAccount("ref-from", 1L);
+        stubAccount("ref-to", 2L);
         when(transferRepository.saveAndFlush(any())).thenThrow(new DataIntegrityViolationException("duplicate key"));
 
-        Transfer result = transferService.initiate(new TransferRequest(), "key-3");
+        TransferRequest request = new TransferRequest();
+        request.setFromAccountReference("ref-from");
+        request.setToAccountReference("ref-to");
+        request.setAmount(new BigDecimal("50.00"));
+
+        Transfer result = transferService.initiate(request, "key-3");
 
         assertThat(result).isSameAs(winner);
         verify(eventProducer, never()).publishTransferInitiated(any());
+    }
+
+    private void stubAccount(String externalReference, Long id) {
+        Account account = new Account();
+        account.setId(id);
+        when(accountRepository.findByExternalReference(externalReference)).thenReturn(Optional.of(account));
     }
 
     @Test
