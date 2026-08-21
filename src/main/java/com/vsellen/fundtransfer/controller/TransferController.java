@@ -32,7 +32,7 @@ public class TransferController {
             @Valid @RequestBody TransferRequest request) {
 
         Transfer transfer = service.initiate(request, idempotencyKey);
-        TransferResponse response = TransferResponse.from(transfer);
+        TransferResponse response = service.toResponse(transfer);
 
         return ResponseEntity
                 .accepted()
@@ -43,6 +43,6 @@ public class TransferController {
     @GetMapping("/{id}")
     public ResponseEntity<TransferResponse> getStatus(@PathVariable String id) {
         Transfer transfer = service.findById(id);
-        return ResponseEntity.ok(TransferResponse.from(transfer));
+        return ResponseEntity.ok(service.toResponse(transfer));
     }
 }
