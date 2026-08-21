@@ -4,6 +4,7 @@ import com.vsellen.fundtransfer.domain.Account;
 import com.vsellen.fundtransfer.domain.Transfer;
 import com.vsellen.fundtransfer.domain.TransferStatus;
 import com.vsellen.fundtransfer.dto.TransferRequest;
+import com.vsellen.fundtransfer.dto.TransferResponse;
 import com.vsellen.fundtransfer.event.TransferInitiatedEvent;
 import com.vsellen.fundtransfer.exception.InsufficientFundsException;
 import com.vsellen.fundtransfer.exception.TransferNotFoundException;
@@ -66,6 +67,18 @@ public class TransferService {
     public Transfer findById(String id) {
         return transferRepository.findById(id)
                 .orElseThrow(() -> new TransferNotFoundException(id));
+    }
+
+    /**
+     * Resolves the internal account ids on a transfer to their opaque external references.
+     * Lives here rather than on the DTO so TransferResponse never needs repository access.
+     */
+    public TransferResponse toResponse(Transfer transfer) {
+        String fromReference = accountRepository.findById(transfer.getFromAccountId())
+                .orElseThrow().getExternalReference();
+        String toReference = accountRepository.findById(transfer.getToAccountId())
+                .orElseThrow().getExternalReference();
+        return TransferResponse.from(transfer, fromReference, toReference);
     }
 
     /**
