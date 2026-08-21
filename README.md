@@ -102,6 +102,10 @@ Unit tests cover the idempotency fast path and the unique-constraint race fallba
 idempotent no-op on a duplicate/redelivered event, the insufficient-funds business failure,
 and the optimistic-lock conflict that's expected to propagate so Kafka retries it.
 
+These are all mocked-repository unit tests, which is enough to verify the Java-level control
+flow but not real Postgres transaction/isolation behavior - see "Known limitations" below for
+the two places that distinction actually matters.
+
 ---
 
 ## Future improvements
@@ -112,6 +116,29 @@ and the optimistic-lock conflict that's expected to propagate so Kafka retries i
 - Reconciliation job to reconcile `PROCESSING` transfers stuck past a timeout
 
 ---
+
+## Known limitations
+
+- **`PROCESSING`'s visibility is flushed, not committed.** `processTransfer` explicitly
+  flushes the `PROCESSING` write so the UPDATE is actually issued to Postgres instead of
+  sitting in Hibernate's persistence context until commit - but a flush is not a commit.
+  Under Postgres's default READ COMMITTED isolation, another connection (e.g. a client
+  polling `GET /v1/transfers/{id}`) still can't see `PROCESSING` until the whole
+  `processTransfer` transaction commits, which only happens once, at the very end of the
+  method, alongside the final `SUCCESS`/`FAILED` write. So the flush fixes "the UPDATE is
+  never even sent to the database mid-method" - a real bug - but does not, on its own,
+  make `PROCESSING` visible to a concurrent poller. Doing that would mean committing the
+  `PROCESSING` write in its own transaction before the debit/credit step begins, which is
+  a bigger structural change than this fix makes.
+- **The unique-constraint race fallback and the `PROCESSING` flush are unverified against
+  real Postgres.** `TransferServiceTest` mocks `AccountRepository`/`TransferRepository`,
+  so it can assert on Java-level control flow (which method got called, what was
+  returned) but has no concept of a real connection, a real transaction, or Postgres's
+  "current transaction is aborted" behavior. Proving either fix actually holds against a
+  real database - especially the unique-constraint race, which needs two genuinely
+  concurrent transactions - would need a Testcontainers-backed integration test. That's a
+  real addition (new test dependencies, real concurrency coordination), not a small one,
+  so it's not included here.
 
 ## Author
 

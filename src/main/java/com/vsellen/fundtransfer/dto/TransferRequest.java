@@ -1,11 +1,13 @@
 package com.vsellen.fundtransfer.dto;
 
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 
 import java.math.BigDecimal;
 
+@DifferentAccounts
 public class TransferRequest {
 
     @NotBlank
@@ -16,6 +18,7 @@ public class TransferRequest {
 
     @NotNull
     @Positive
+    @Digits(integer = 17, fraction = 2, message = "amount must have at most 2 decimal places")
     private BigDecimal amount;
 
     public String getFromAccountReference() { return fromAccountReference; }
