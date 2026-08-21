@@ -38,8 +38,17 @@ public class TransferService {
      * original transfer instead of creating a second one. The unique constraint on
      * referenceId is the real guarantee - the findByReferenceId check is just the fast path
      * that avoids hitting it on every retry.
+     *
+     * Deliberately NOT @Transactional. It used to be, wrapping this entire method - including
+     * the unique-constraint-violation fallback read in createAndPublish - in one service-level
+     * transaction. That was never buying real atomicity here (the only write on the happy path
+     * is a single INSERT, which is already atomic on its own), and it actively broke the
+     * fallback on Postgres: see the comment on the catch block in createAndPublish for why.
+     * With no service-level transaction, each call below to transferRepository /
+     * accountRepository gets its own transaction automatically - Spring Data JPA's
+     * SimpleJpaRepository is itself @Transactional per method (read-only for lookups,
+     * read-write for saveAndFlush) - which is exactly the isolation the fallback needs.
      */
-    @Transactional
     public Transfer initiate(TransferRequest request, String idempotencyKey) {
         return transferRepository.findByReferenceId(idempotencyKey)
                 .orElseGet(() -> createAndPublish(request, idempotencyKey));
@@ -61,9 +70,33 @@ public class TransferService {
         transfer.setCreatedAt(LocalDateTime.now());
 
         try {
+            // This call goes to the transferRepository bean, which Spring Data JPA wraps in
+            // its own transaction (SimpleJpaRepository#saveAndFlush is @Transactional). That
+            // transaction - not anything at this service layer - is what fails and rolls back
+            // below.
             transferRepository.saveAndFlush(transfer);
         } catch (DataIntegrityViolationException raceLost) {
-            // A concurrent request with the same idempotency key won the insert first.
+            // Postgres aborts an ENTIRE transaction the instant any statement inside it
+            // errors - here, the unique-constraint violation on referenceId. Every later
+            // statement on that same transaction then fails too, with "current transaction
+            // is aborted, commands ignored until end of transaction block" (SQLState 25P02),
+            // even a harmless SELECT - until a ROLLBACK happens. Catching the Java exception
+            // does not by itself roll anything back.
+            //
+            // This used to be broken: when this whole method ran inside initiate()'s
+            // @Transactional, the failed saveAndFlush and this fallback findByReferenceId
+            // shared that same one aborted Postgres transaction, so the retry read would
+            // itself throw against a real database - a bug the mocked TransferServiceTest
+            // could never catch, since Mockito has no concept of a real connection or
+            // transaction state; its stubbed findByReferenceId call "succeeds" no matter
+            // what the previous stubbed call did.
+            //
+            // Now, with no service-level transaction: saveAndFlush's own transaction (opened
+            // by the repository proxy, scoped to just that call) is already rolled back by
+            // the time we're standing in this catch block - its boundary was that call
+            // itself, which has already returned via this exception. This findByReferenceId
+            // call is a fresh call to the repository bean, so it opens a brand new
+            // transaction, on a connection that is not in Postgres's aborted state.
             return transferRepository.findByReferenceId(idempotencyKey).orElseThrow();
         }
 
@@ -107,7 +140,18 @@ public class TransferService {
         }
 
         transfer.setStatus(TransferStatus.PROCESSING);
-        transferRepository.save(transfer);
+        // save() alone only marks the entity dirty in the persistence context; the actual
+        // UPDATE is deferred to the next flush. The next calls here are
+        // accountRepository.findById(...) - primary-key lookups, which go straight to
+        // EntityManager.find() rather than a JPQL/criteria query. Hibernate's auto-flush
+        // only fires before a query that might be affected by pending changes, and a PK
+        // lookup on Account isn't recognized as something a pending Transfer UPDATE could
+        // affect - so auto-flush does NOT trigger here. Without forcing it explicitly, this
+        // UPDATE would just sit in the persistence context until the transaction commits at
+        // the very end of this method, alongside the SUCCESS/FAILED write - i.e. Postgres
+        // would go straight from INITIATED to SUCCESS/FAILED in one commit, and PROCESSING
+        // would never actually be issued as its own statement.
+        transferRepository.saveAndFlush(transfer);
 
         Account from = accountRepository.findById(transfer.getFromAccountId()).orElseThrow();
         Account to = accountRepository.findById(transfer.getToAccountId()).orElseThrow();
